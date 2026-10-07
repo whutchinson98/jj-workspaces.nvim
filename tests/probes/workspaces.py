@@ -94,6 +94,37 @@ class WorkspaceCapabilities(unittest.TestCase):
                 self.assertIn(name, self.names())
                 self.assertTrue(target.is_dir())
 
+    def test_forget_keeps_directory_dirty_files_and_metadata(self):
+        target = self.add()
+        dirty = target / "unsnapshotted.txt"
+        dirty.write_text("keep this data\n")
+        before = {p.relative_to(target): p.read_bytes()
+                  for p in target.rglob("*") if p.is_file()}
+        self.jj(self.repo, "workspace", "forget", "--ignore-working-copy", "--", "feature")
+        self.assertNotIn("feature", self.names())
+        after = {p.relative_to(target): p.read_bytes()
+                 for p in target.rglob("*") if p.is_file()}
+        self.assertEqual(after, before)
+        self.assertEqual(dirty.read_text(), "keep this data\n")
+
+    def test_forget_missing_workspace_path(self):
+        target = self.add()
+        # Move, rather than delete, the directory to prove forget cannot touch it.
+        moved = self.base / "moved"
+        target.rename(moved)
+        self.jj(self.repo, "workspace", "forget", "--ignore-working-copy", "--", "feature")
+        self.assertEqual(self.names(), {"default"})
+        self.assertTrue(moved.is_dir())
+
+    def test_forget_does_not_snapshot_source_files(self):
+        self.add()
+        before = self.revision(self.repo)
+        dirty = self.repo / "not-yet-recorded.txt"
+        dirty.write_text("keep source dirty\n")
+        self.jj(self.repo, "workspace", "forget", "--ignore-working-copy", "--", "feature")
+        self.assertEqual(self.revision(self.repo), before)
+        self.assertEqual(dirty.read_text(), "keep source dirty\n")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
