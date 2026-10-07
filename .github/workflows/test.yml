@@ -1,0 +1,75 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        neovim: [v0.11.0, v0.12.5]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: nvim-telescope/telescope.nvim
+          ref: 40aedd8a68c78a656a10a8d62d80c54af59420fb
+          path: .test-deps/telescope.nvim
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: nvim-lua/plenary.nvim
+          ref: 74b06c6c75e4eeb3108ec01852001636d85a932b
+          path: .test-deps/plenary.nvim
+          persist-credentials: false
+      - uses: rhysd/action-setup-vim@febef33995d6649302e9d88dda81e071b68f16a7 # v1
+        with:
+          neovim: true
+          version: ${{ matrix.neovim }}
+      - name: Install pinned jj and StyLua
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/jj-workspaces-tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl --fail --location --retry 3 --output jj.tar.gz \
+            https://github.com/jj-vcs/jj/releases/download/v0.44.0/jj-v0.44.0-x86_64-unknown-linux-musl.tar.gz
+          echo '0a07bab4641a55fd2bc2fd1563ba3a3f9a577584086ad74086a1c5b69b3ffce9  jj.tar.gz' | sha256sum --check
+          tar -xzf jj.tar.gz ./jj
+          curl --fail --location --retry 3 --output stylua.zip \
+            https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-linux-x86_64.zip
+          echo 'bcb0d855e91f102f28a370e850f8566b3b44b79e6274d806ea5246837c0fd5ab  stylua.zip' | sha256sum --check
+          unzip -q stylua.zip stylua
+          chmod +x jj stylua
+          echo "$tools" >> "$GITHUB_PATH"
+      - name: Versions and formatting
+        run: |
+          nvim --version
+          jj --version
+          stylua --version
+          make lint
+      - name: Core API and capability tests
+        run: make test
+      - name: Telescope and real core end-to-end tests
+        env:
+          TELESCOPE_DIR: ${{ github.workspace }}/.test-deps/telescope.nvim
+          PLENARY_DIR: ${{ github.workspace }}/.test-deps/plenary.nvim
+        run: make test-telescope
+      - name: Validate help tags
+        run: nvim --headless --clean -c 'helptags doc' -c 'qa!'
