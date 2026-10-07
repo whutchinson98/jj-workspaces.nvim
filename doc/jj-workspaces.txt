@@ -1,0 +1,274 @@
+*jj-workspaces.txt*          Local jj workspaces for Neovim
+
+CONTENTS                                                *jj-workspaces*
+
+    Requirements and setup ........... |jj-workspaces-setup|
+    Lua API .......................... |jj-workspaces-api|
+    Completion results ............... |jj-workspaces-results|
+    Lifecycle hooks .................. |jj-workspaces-hooks|
+    Safety and paths ................. |jj-workspaces-safety|
+    Telescope ........................ |jj-workspaces-telescope|
+    Logging .......................... |jj-workspaces-logging|
+
+==============================================================================
+REQUIREMENTS AND SETUP                                  *jj-workspaces-setup*
+
+Requires Neovim 0.11+ and jj 0.44+ with workspace JSON/root capabilities. Linux
+is tested. Core requires no Plenary or Telescope; the optional extension needs
+Telescope and its Plenary dependency. Both colocated and non-colocated jj
+repositories are supported. Nested Git-only checkouts stop discovery.
+
+Install whutchinson98/jj-workspaces.nvim using your plugin manager. Loading the
+Lua module performs no discovery or process execution and installs no mappings.
+Setup is optional: >lua
+    local ws = require('jj-workspaces')
+    ws.setup({
+      jj_command = 'jj',
+      cwd_scope = 'global',
+      update_on_change = true,
+      missing_file = 'directory',
+      clearjumps_on_change = true,
+      workspace_directory = nil,
+      log_level = nil,
+      operation_timeout_ms = 30000,
+      notify = true,
+    })
+<
+Options:
+  jj_command              Executable name or absolute path. Never shell text.
+  cwd_scope               'global' (cd), 'tab' (tcd), 'window' (lcd).
+  update_on_change        Map the current file to the target workspace if safe.
+  missing_file            'directory', 'keep', or a synchronous Lua function.
+  clearjumps_on_change    Clear only the invoking window's jumplist.
+  workspace_directory     Existing absolute directory for default create paths.
+  log_level               See |jj-workspaces-logging|.
+  operation_timeout_ms    Positive finite integer; timeout for each CLI call.
+  notify                  Built-in error notifications; callbacks still run.
+
+Each setup call merges into fresh defaults, validates, then replaces the current
+configuration. Unknown keys/wrong types are errors; a rejected setup leaves the
+previous configuration intact. Requests retain a snapshot of their settings.
+Reconfiguration does not remove hooks or change editor state.
+
+A missing_file callback runs after cwd changes with:
+  { source = {name, path}, target = workspace, window = winid, reason = string }
+Reasons: missing, unnamed, inaccessible, outside_target. The callback is protected
+but not awaited. It is trusted user code, not a transaction or rollback hook.
+
+==============================================================================
+LUA API                                                *jj-workspaces-api*
+
+Every operation returns a session-local operation ID immediately. Its optional
+callback runs once, asynchronously on Neovim's main loop, including preflight
+errors. Callbacks receive one result table (|jj-workspaces-results|).
+
+Common options: cwd is an absolute directory selecting the repository context.
+Without it, the effective cwd of the invoking window/tab is captured. An override
+does not change editor cwd and does not bypass originating-context checks.
+Pass nil for omitted options before a callback. Examples: >lua
+    ws.list(nil, function(result) vim.print(result) end)
+    ws.switch('feature', nil, function(result) vim.print(result) end)
+<
+ws.discover(opts, callback)
+    data = { repository, root, name?, workspaces }
+    repository is an opaque canonical shared-metadata identity, not a directory
+    base. root is the workspace root. name can be nil for a moved/unverifiable
+    current workspace. workspaces is an array of workspace records.
+
+ws.list(opts, callback)
+    data is an array of { name, path?, commit_id, current? } records. An unavailable
+    path is nil. Name is unique only within the captured repository. Inventory
+    does not promise freshness, cleanliness, or absence of conflicts.
+
+ws.create(opts, callback)
+    opts.name       Required nonempty, NUL-free workspace name.
+    opts.path       Optional destination, independent of name.
+    opts.revision   Single parent revision expression; default '@'.
+    opts.switch     Boolean; default true, switch after confirmed creation.
+    opts.scope      Optional switch scope override.
+    opts.cwd        Optional source context override.
+
+    A new working-copy change is created on top of the resolved parent; the
+    parent is not directly edited. Revision resolution may snapshot source disk
+    files. Loaded modified source buffers block creation before mutation.
+    No bookmark, remote, or tracking operation is implied. Native sparse patterns
+    are copied. data includes workspace, parent_revision, created and switched;
+    partial/uncertain outcomes may add source_snapshot, observed_workspace, and
+    destination_exists. Do not retry blindly if creation was incomplete.
+
+ws.switch(name, opts, callback)
+    Select an exact existing workspace name, not a path/revision/bookmark.
+    opts.scope can override cwd_scope. Changes editor cwd only, not jj history.
+    data = { workspace, scope, root }. Selecting the current named workspace is a
+    noop: retain its current subdirectory, buffer, and jumplist.
+
+ws.forget(name, opts, callback)
+    Remove one exact workspace registration. FILES ARE NEVER DELETED. There is no
+    force option, recursive cleanup, implicit save, or automatic switch away.
+    Unknown/current/active-editor targets are rejected; see safety below.
+    data includes workspace (the previous record/commit ID), files_deleted=false,
+    and forgotten when the postcondition was checked. A forgotten directory may
+    require explicit recovery before further jj use. Commit retention after
+    losing references is governed by jj, not guaranteed by this plugin.
+
+No public delete API, statusline stub, global root setters, Git aliases, or Ex
+commands are provided. User keymaps can call these Lua functions directly.
+
+==============================================================================
+COMPLETION RESULTS                                     *jj-workspaces-results*
+
+Result table:
+  id          Operation ID.
+  operation   discover, list, create, switch, or forget.
+  status      success, noop, error, partial, or unknown.
+  data        Operation-specific verified/observed state.
+  error       nil or {code, message, stage, exit_code?, stderr?}.
+  warnings    Array of diagnostic strings, including isolated listener failures.
+
+success     Verified completion.
+noop        State already held; no mutation/success event (same-workspace switch).
+error       Failure without a confirmed successful operation.
+partial     Some verified state changed but later work failed, e.g. successful
+            creation followed by a blocked automatic switch.
+unknown     A potentially mutating command failed/timed out and its effects
+            cannot be confidently attributed or reconstructed.
+
+Error codes include invalid_argument, dependency, not_repository, unsupported,
+busy, context_changed, unavailable, modified_buffer, command_failed, timeout,
+invalid_output, and editor_failed. Inspect codes instead of matching jj's human
+stderr; diagnostic strings are bounded and may be truncated.
+
+A timeout kills and reaps the process, then attempts read-only reconciliation.
+It never means a mutation was safely rolled back. Do not delete the destination,
+retry creation/forget, or repair jj automatically in response to unknown/partial.
+Inspect the result and jj workspace state first.
+
+Only one mutation or switch may be active per Neovim instance. Overlap gets busy;
+there is no hidden queue. Read-only requests may overlap. The lock remains held
+through hooks and completion, so schedule follow-up mutations: >lua
+    ws.create({name = 'feature', switch = false}, function(result)
+      if result.status == 'success' then
+        vim.schedule(function() ws.switch('feature') end)
+      end
+    end)
+<
+Public process cancellation is not exposed. Closing a picker after submitting a
+mutation does not cancel, undo, or retry that operation.
+
+==============================================================================
+LIFECYCLE HOOKS                                        *jj-workspaces-hooks*
+
+>lua
+    local unsubscribe = ws.on_change(function(event)
+      vim.print(event.kind, event.workspace.name)
+    end)
+    -- unsubscribe() is idempotent and removes only this listener.
+<
+Events: create, switch, forget. Each contains operation_id, kind, repository,
+workspace, and warnings. Create adds parent_revision; Switch adds previous
+{name?, path} and scope. Forget may have a workspace with nil path and means
+registration removal only, never disk deletion.
+
+Dispatch is main-loop, registration-order, and uses a listener-list snapshot.
+Each listener receives an independent payload copy. Subscribe/unsubscribe during
+a dispatch affects later events. Exceptions become warnings; other listeners and
+completion still run. Async returns are not awaited and listeners cannot veto or
+roll back a completed operation.
+
+Create fires only after successful command/postcondition validation, before the
+optional automatic Switch. Switch follows built-in file/jump handling. Forget
+follows confirmed registry removal. Events precede completion; create-and-switch
+uses one ID. Noops and failures emit no corresponding success event. A buffer
+failure after cwd changed may still emit Switch with a partial result.
+
+==============================================================================
+SAFETY AND PATHS                                       *jj-workspaces-safety*
+
+Explicit relative create paths are source-workspace-root-relative, not relative
+to the editor subdirectory. An omitted path uses the parent of the source root
+or workspace_directory plus the name. Names containing separators, '.' or '..'
+require an explicit path. The destination must not already exist, its parent
+must exist, and it cannot be inside a jj workspace or metadata. Paths are passed
+as literal argv values, without environment/tilde/glob/shell expansion.
+
+Names and paths are distinct. Existing workspaces use jj's recorded paths; missing
+paths remain visible and cannot be switched to. Forget can remove their registry
+entries without guessing a path. Changed/foreign target repositories are rejected.
+Broken .jj metadata never triggers Git fallback or ancestor selection across a
+nested Git-only boundary.
+
+Switch scopes use Neovim's normal cd/tcd/lcd behavior. Other windows' local cwd
+settings are not cleared. Only the invoking window's file/jumplist is managed.
+A named normal file under the old root maps to an existing target counterpart.
+Special/unrelated buffers stay put. Missing/unnamed files use missing_file.
+Replacing a modified source or modified target buffer is refused before cwd
+changes; no implicit save/discard/reload. update_on_change=false leaves buffers
+untouched. Old buffers are never purged and cursor/session migration is not done.
+
+Jump cleanup happens after built-in file handling and before hooks, only in the
+invoking window. User autocmds/hooks can add new entries. An error after cwd changes
+is partial, not an attempt to undo arbitrary autocmd side effects.
+
+Forget refuses the current workspace, targets active in other editor windows,
+and known loaded modified target buffers. The name 'default' is not privileged
+when inactive. These are editor-local checks, not a cross-process lock. For an
+unavailable path, inspection is limited and the result contains a warning.
+
+Discovery/switching do not snapshot or repair stale workspaces. Mutating commands
+disable snapshot.auto-update-stale even if enabled in user configuration. Recover
+stale state explicitly with jj. No automatic fetch, tracking, push, rebase, force
+history changes, recursive file deletion, or rollback occurs.
+
+==============================================================================
+TELESCOPE                                              *jj-workspaces-telescope*
+
+>lua
+    require('telescope').load_extension('jj_workspaces')
+    local picker = require('telescope').extensions.jj_workspaces
+    picker.workspaces()
+    picker.create_workspace()
+<
+Workspace picker: Enter switches; Ctrl-D (insert/normal) asks to forget, keeping
+files. Cancel is the default confirmation. No force toggle. Search covers full
+name/path/ID, while columns display readable shortened values.
+
+Creation picker: Enter selects a parent, Ctrl-R uses typed revision text. The '@'
+entry snapshots at creation; other entries pin IDs. Then asynchronous vim.ui.input
+prompts ask name and directory. Empty directory delegates defaults to core; nil
+cancels. Candidate queries are bounded/read-only and do not fetch or snapshot.
+
+Options: normal Telescope layout/theme/sorting/path-display/attach_mappings plus
+cwd, scope, on_complete(result), jj_command, revision_timeout_ms (30000 default).
+Caller mappings run last; their boolean return keeps Telescope semantics. Options
+are copied. Caching/previewing are disabled. Each call returns a UI cancellation
+closure. Draft prompts/generations belong to a single flow, not global force state.
+
+The revision query is extension-owned; if core uses a custom jj executable, pass
+that same jj_command explicitly to create_workspace. Empty directory prompts do
+not display a guessed core-configured default. name/path/revision/switch options
+are not picker prefills; use the direct core API for noninteractive variants.
+
+Invoke from an editing window. Origin window/tab/buffer/cwd/repository is checked
+before actions. Closed/replaced pickers ignore late callbacks. A vim.ui.select
+provider that closes the workspace picker cancels its pending confirmation;
+providers must preserve the original picker for that confirmation to complete.
+Use the core API if your provider cannot do that. UI errors stay visible even if
+core notify=false; enabling both layers can produce duplicate error messages.
+
+==============================================================================
+LOGGING                                                *jj-workspaces-logging*
+
+File: stdpath('cache') .. '/jj-workspaces.log'. Created lazily; bounded JSONL with
+one .1 rotation backup at 1 MiB. Records carry timestamp, severity, operation ID,
+kind, stage, and bounded message. Write/rotation failure disables file logging for
+the session rather than failing workspace operations.
+
+Precedence: nonempty JJ_WORKSPACES_LOG environment variable, setup log_level,
+vim.g.jj_workspaces_log_level, then warn. Recognized case-insensitive values:
+trace, debug, info, warn, error, off; fatal aliases error. Invalid strings fall
+back to warn. Setup recomputes the choice; in-flight requests keep their setting.
+
+Logs may contain private paths/names and jj stderr. Review them before sharing.
+Notifications and logs are independent; notify=false does not suppress callbacks.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

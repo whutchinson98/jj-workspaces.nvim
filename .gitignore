@@ -1,0 +1,6 @@
+/.test-deps/
+/doc/tags
+__pycache__/
+*.pyc
+*.swp
+*.swo
