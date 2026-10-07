@@ -1,4 +1,4 @@
-"""HUT-94 CLI capability probes, not tests of a plugin implementation.
+"""Read-only jj discovery capability probes.
 
 Run: python3 tests/probes/discovery.py
 Validated with jj 0.44.0. Uses only the Python standard library and jj.
