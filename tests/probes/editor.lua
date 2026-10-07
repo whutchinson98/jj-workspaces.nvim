@@ -46,6 +46,28 @@ local ok, err = xpcall(function()
   equal(cwd(second), paths.tab)
   equal(cwd(third), paths.window)
   equal(vim.api.nvim_get_current_win(), third)
+  local function jump_count(win)
+    local position = vim.fn.win_id2tabwin(win)
+    return #vim.fn.getjumplist(position[2], position[1])[1]
+  end
+  for _, win in ipairs({ first, third }) do
+    vim.api.nvim_win_call(win, function()
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_win_set_buf(win, buf)
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+      })
+      vim.cmd("normal! gg")
+      vim.cmd("normal! 5G")
+      vim.cmd("normal! 10G")
+    end)
+    assert(jump_count(win) > 0, "Expected a populated jumplist")
+  end
+  local other_jumps = jump_count(third)
+  vim.api.nvim_win_call(first, function() vim.cmd("clearjumps") end)
+  equal(jump_count(first), 0)
+  equal(jump_count(third), other_jumps)
+  equal(vim.api.nvim_get_current_win(), third)
 end, debug.traceback)
 -- Close temporary windows and leave the fixture before removing it.
 vim.cmd("silent! tabonly!")
